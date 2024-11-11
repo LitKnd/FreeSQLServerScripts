@@ -23,19 +23,38 @@ CREATE or ALTER PROCEDURE [dbo].[dba_QueryStoreUnforceFailed]
 			@maxDatabaseI int, 
 			@databaseName sysname, 
 			@dynamicSQL nvarchar(2000),
-			@msg nvarchar(2000)
+			@msg nvarchar(2000),
+			@SQLVersion AS tinyint = (@@microsoftversion / 0x1000000) & 0xff,
+			@ServerName AS sysname = CONVERT(sysname, SERVERPROPERTY('ServerName'));
 
 		DECLARE @databases TABLE (i int identity primary key, databaseName sysname);
 		CREATE TABLE #forceFailedPlans (forcedFailsId INT IDENTITY, databaseName sysname, queryId INT, planId INT, lastForcedFailureReason nvarchar(128), querySqlText nvarchar(4000));
 
-		/* System databases don't have query store enabled */
+		/* Only check databases that have query store enabled */
 		INSERT @databases (databaseName) 
 		SELECT [name] 
 		FROM sys.databases
 		WHERE 
 			state_desc = 'ONLINE'
 			AND user_access = 0
-			AND name NOT IN ('master', 'model', 'msdb', 'tempdb');
+			AND is_query_store_on = 1;
+
+		/* Remove AG secondary databases where allow connections is off */
+		IF @SQLVersion >= 11 AND 3 = (SELECT COUNT(*) FROM sys.all_objects WHERE name IN('availability_replicas','dm_hadr_availability_group_states','dm_hadr_database_replica_states'))
+		BEGIN
+			DELETE FROM @databases
+			WHERE [databaseName] IN (
+				SELECT [name] FROM sys.dm_hadr_database_replica_states AS drs 
+				  INNER JOIN sys.availability_replicas AS ar
+				  ON ar.replica_id = drs.replica_id
+				  INNER JOIN sys.dm_hadr_availability_group_states ags 
+				  ON ags.group_id = ar.group_id
+				  INNER JOIN sys.databases dbs
+				  ON dbs.database_id = drs.database_id
+				  WHERE ar.secondary_role_allow_connections = 0
+				  AND ags.primary_replica <> @ServerName
+				);
+		END
 
 		/* Loop through each database */
 		SELECT @maxDatabaseI = max(i) FROM @databases;
